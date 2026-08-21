@@ -70,6 +70,63 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("LARGE DUSD POOL SWAP", message)
         self.assertIn("https://bscscan.com/tx/0x" + "ab" * 32, message)
 
+    def test_example_standx_withdraw_alert(self):
+        event = {
+            "transactionHash": HexBytes(
+                "0x9a622d7b10a6c240ba74b096ac7f5ae92794330809390d987658a3c8f5a03fdd"
+            ),
+            "args": {
+                "from": monitor.STANDX_HIGHWAY_ADDRESS,
+                "to": "0x0808A2B6962EF20936431178743E47277016104d",
+                "value": 148_698_502_775,
+            },
+        }
+
+        with patch.object(
+            monitor, "STANDX_WITHDRAW_THRESHOLD", Decimal("50000")
+        ), patch.object(monitor, "send_telegram") as send:
+            monitor.handle_standx_withdraw(event)
+
+        send.assert_called_once()
+        message = send.call_args.args[0]
+        self.assertIn("LARGE STANDX WITHDRAWAL", message)
+        self.assertIn("148,698.502775 DUSD", message)
+        self.assertIn(event["args"]["to"], message)
+        self.assertIn(
+            "https://bscscan.com/tx/" + event["transactionHash"].hex(), message
+        )
+
+    def test_small_standx_withdraw_does_not_alert(self):
+        event = {
+            "transactionHash": HexBytes("0x" + "cd" * 32),
+            "args": {
+                "from": monitor.STANDX_HIGHWAY_ADDRESS,
+                "to": "0x" + "34" * 20,
+                "value": 1_000 * 10**6,
+            },
+        }
+
+        with patch.object(
+            monitor, "STANDX_WITHDRAW_THRESHOLD", Decimal("50000")
+        ), patch.object(monitor, "send_telegram") as send:
+            monitor.handle_standx_withdraw(event)
+
+        send.assert_not_called()
+
+    def test_fetches_standx_withdraws_from_dusd_highway_transfers(self):
+        with patch.object(
+            monitor.w3.eth, "get_logs", side_effect=[[], []]
+        ) as get_logs:
+            monitor.fetch_relevant_logs(100, 200)
+
+        self.assertEqual(get_logs.call_count, 2)
+        withdraw_filter = get_logs.call_args_list[1].args[0]
+        self.assertEqual(withdraw_filter["address"], monitor.DUSD_ADDRESS)
+        self.assertEqual(
+            withdraw_filter["topics"],
+            [monitor.TRANSFER_TOPIC, monitor.STANDX_HIGHWAY_TOPIC],
+        )
+
     def test_telegram_errors_do_not_leak_bot_token(self):
         leaked_error = RuntimeError(
             "request failed for https://api.telegram.org/bot"

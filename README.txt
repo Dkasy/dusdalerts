@@ -9,6 +9,7 @@ Alerts:
   - >=10% pool token-balance TVL drop
   - V3 Burn event >=10% of reference TVL
   - >=$50,000 direct DUSD/USDT swap
+  - >=$50,000 DUSD withdrawal from the StandX Highway
   - DUSD <0.998 USDT
 
 Install:
