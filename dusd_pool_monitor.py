@@ -9,8 +9,8 @@ Alerts:
    percentage of the reference TVL.
 3) A swap has >= WHALE_USD_THRESHOLD (default $50,000) of USDT notional.
 4) DUSD pool price falls below DEPEG_THRESHOLD (default 0.998 USDT).
-5) StandX Highway releases at least STANDX_WITHDRAW_THRESHOLD (default $50,000)
-   of DUSD in a completed withdrawal.
+5) Every completed DUSD withdrawal from the StandX Highway.
+6) Every StandX Gateway redemption request and completed redemption payout.
 
 The script is read-only. It never needs a wallet/private key.
 """
@@ -60,21 +60,19 @@ POOL_ADDRESS_RAW = "0xB67e5EaF770a384Ab28029d08B9bC5EBE32beb0F"
 DUSD_ADDRESS_RAW = "0xaf44a1e76f56ee12adbb7ba8acd3cbd474888122"
 USDT_ADDRESS_RAW = "0x55d398326f99059fF775485246999027B3197955"
 STANDX_HIGHWAY_ADDRESS_RAW = "0x90bb5bdC6Acd166237640C8707a694f1Fc3AAB84"
+STANDX_GATEWAY_ADDRESS_RAW = "0x00b4F9B510893505aceFB10eC91cBC972185088e"
 
 RPC_URL = os.getenv("BSC_RPC_URL", "").strip()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 
-POLL_SECONDS = float_env("POLL_SECONDS", "2")
+POLL_SECONDS = float_env("POLL_SECONDS", "20")
 CONFIRMATIONS = int_env("CONFIRMATIONS", "2")
 LOG_BLOCK_CHUNK = int_env("LOG_BLOCK_CHUNK", "200")
-MAX_BACKFILL_BLOCKS = int_env("MAX_BACKFILL_BLOCKS", "10000")
+MAX_BACKFILL_BLOCKS = int_env("MAX_BACKFILL_BLOCKS", "0")
 
 LIQUIDITY_DROP_PCT = decimal_env("LIQUIDITY_DROP_PCT", "10") / Decimal("100")
 WHALE_USD_THRESHOLD = decimal_env("WHALE_USD_THRESHOLD", "50000")
-STANDX_WITHDRAW_THRESHOLD = decimal_env(
-    "STANDX_WITHDRAW_THRESHOLD", str(WHALE_USD_THRESHOLD)
-)
 DEPEG_THRESHOLD = decimal_env("DEPEG_THRESHOLD", "0.998")
 DEPEG_REARM = decimal_env("DEPEG_REARM", "0.999")
 SEND_STARTUP_MESSAGE = os.getenv("SEND_STARTUP_MESSAGE", "true").lower() in {
@@ -186,6 +184,29 @@ ERC20_ABI = [
     },
 ]
 
+STANDX_GATEWAY_ABI = [
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "user", "type": "address"},
+            {"indexed": False, "name": "amount", "type": "uint256"},
+            {"indexed": False, "name": "id", "type": "uint256"},
+        ],
+        "name": "WithdrawRequest",
+        "type": "event",
+    },
+    {
+        "anonymous": False,
+        "inputs": [
+            {"indexed": True, "name": "user", "type": "address"},
+            {"indexed": False, "name": "amount", "type": "uint256"},
+            {"indexed": False, "name": "id", "type": "uint256"},
+        ],
+        "name": "Withdraw",
+        "type": "event",
+    },
+]
+
 SWAP_TOPIC = Web3.to_hex(
     Web3.keccak(text="Swap(address,address,int256,int256,uint160,uint128,int24,uint128,uint128)")
 ).lower()
@@ -194,6 +215,12 @@ BURN_TOPIC = Web3.to_hex(
 ).lower()
 TRANSFER_TOPIC = Web3.to_hex(
     Web3.keccak(text="Transfer(address,address,uint256)")
+).lower()
+WITHDRAW_REQUEST_TOPIC = Web3.to_hex(
+    Web3.keccak(text="WithdrawRequest(address,uint256,uint256)")
+).lower()
+WITHDRAW_TOPIC = Web3.to_hex(
+    Web3.keccak(text="Withdraw(address,uint256,uint256)")
 ).lower()
 
 
@@ -228,7 +255,6 @@ if not TELEGRAM_CHAT_ID:
 decimal_settings = (
     LIQUIDITY_DROP_PCT,
     WHALE_USD_THRESHOLD,
-    STANDX_WITHDRAW_THRESHOLD,
     DEPEG_THRESHOLD,
     DEPEG_REARM,
 )
@@ -242,8 +268,6 @@ if not (Decimal("0") < LIQUIDITY_DROP_PCT < Decimal("1")):
     die("LIQUIDITY_DROP_PCT must be between 0 and 100")
 if WHALE_USD_THRESHOLD <= 0:
     die("WHALE_USD_THRESHOLD must be positive")
-if STANDX_WITHDRAW_THRESHOLD < 0:
-    die("STANDX_WITHDRAW_THRESHOLD cannot be negative")
 if CONFIRMATIONS < 0:
     die("CONFIRMATIONS cannot be negative")
 if not math.isfinite(POLL_SECONDS) or POLL_SECONDS <= 0:
@@ -262,10 +286,14 @@ POOL_ADDRESS = Web3.to_checksum_address(POOL_ADDRESS_RAW)
 DUSD_ADDRESS = Web3.to_checksum_address(DUSD_ADDRESS_RAW)
 USDT_ADDRESS = Web3.to_checksum_address(USDT_ADDRESS_RAW)
 STANDX_HIGHWAY_ADDRESS = Web3.to_checksum_address(STANDX_HIGHWAY_ADDRESS_RAW)
+STANDX_GATEWAY_ADDRESS = Web3.to_checksum_address(STANDX_GATEWAY_ADDRESS_RAW)
 
 pool = w3.eth.contract(address=POOL_ADDRESS, abi=POOL_ABI)
 dusd = w3.eth.contract(address=DUSD_ADDRESS, abi=ERC20_ABI)
 usdt = w3.eth.contract(address=USDT_ADDRESS, abi=ERC20_ABI)
+standx_gateway = w3.eth.contract(
+    address=STANDX_GATEWAY_ADDRESS, abi=STANDX_GATEWAY_ABI
+)
 
 token0: str
 token1: str
@@ -574,19 +602,58 @@ def handle_standx_withdraw(event: Any) -> None:
     tx_hash = Web3.to_hex(event["transactionHash"])
     amount = raw_to_human(int(args["value"]), dusd_decimals)
 
-    if amount < STANDX_WITHDRAW_THRESHOLD:
-        return
-
     send_telegram(
-        "🏦 <b>LARGE STANDX WITHDRAWAL</b>\n"
+        "🏦 <b>STANDX WITHDRAWAL COMPLETED</b>\n"
         f"DUSD withdrawn: <b>{amount:,.6f} DUSD</b>\n"
         f"Nominal value: <b>{money(amount)}</b>\n"
         f'Recipient: <code>{args["to"]}</code>\n'
         f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
     )
     log.warning(
-        "Large StandX withdrawal | amount=%s | recipient=%s | tx=%s",
+        "StandX withdrawal | amount=%s | recipient=%s | tx=%s",
         amount, args["to"], tx_hash,
+    )
+
+
+def handle_standx_redeem_request(event: Any) -> None:
+    """Alert when DUSD is burned to start the StandX redemption delay."""
+    args = event["args"]
+    tx_hash = Web3.to_hex(event["transactionHash"])
+    amount = raw_to_human(int(args["amount"]), dusd_decimals)
+
+    send_telegram(
+        "⏳ <b>STANDX REDEMPTION REQUESTED</b>\n"
+        f"DUSD burned: <b>{amount:,.6f} DUSD</b>\n"
+        f"Nominal value: <b>{money(amount)}</b>\n"
+        f'Redeemer: <code>{args["user"]}</code>\n'
+        f'Redemption ID: <code>{args["id"]}</code>\n'
+        f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
+    )
+    log.warning(
+        "StandX redemption requested | amount=%s | user=%s | id=%s | tx=%s",
+        amount, args["user"], args["id"], tx_hash,
+    )
+
+
+def handle_standx_redeem(event: Any) -> None:
+    """Alert when StandX completes a redemption with a base-asset payout."""
+    args = event["args"]
+    tx_hash = Web3.to_hex(event["transactionHash"])
+    # BSC USDT and USDC use 18 decimals. The Gateway event intentionally does
+    # not identify which supported base asset was paid.
+    amount = raw_to_human(int(args["amount"]), 18)
+
+    send_telegram(
+        "💸 <b>STANDX REDEMPTION COMPLETED</b>\n"
+        f"Base asset paid: <b>{amount:,.6f} USDT/USDC</b>\n"
+        f"Nominal value: <b>{money(amount)}</b>\n"
+        f'Redeemer: <code>{args["user"]}</code>\n'
+        f'Redemption ID: <code>{args["id"]}</code>\n'
+        f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
+    )
+    log.warning(
+        "StandX redemption completed | amount=%s | user=%s | id=%s | tx=%s",
+        amount, args["user"], args["id"], tx_hash,
     )
 
 
@@ -636,14 +703,20 @@ def check_tvl(snapshot: Dict[str, Decimal]) -> None:
 
 # ------------------------------ Logs ---------------------------------
 
-def fetch_pool_logs(from_block: int, to_block: int) -> list:
+def fetch_pool_and_gateway_logs(from_block: int, to_block: int) -> list:
     return list(w3.eth.get_logs(
         {
             "fromBlock": from_block,
             "toBlock": to_block,
-            "address": POOL_ADDRESS,
-            # OR filter for topic0: Swap OR Burn.
-            "topics": [[SWAP_TOPIC, BURN_TOPIC]],
+            "address": [POOL_ADDRESS, STANDX_GATEWAY_ADDRESS],
+            # OR filter across the pool and Gateway. Address scoping prevents
+            # identically named events from unrelated contracts matching.
+            "topics": [[
+                SWAP_TOPIC,
+                BURN_TOPIC,
+                WITHDRAW_REQUEST_TOPIC,
+                WITHDRAW_TOPIC,
+            ]],
         }
     ))
 
@@ -662,7 +735,7 @@ def fetch_standx_withdraw_logs(from_block: int, to_block: int) -> list:
 
 def fetch_relevant_logs(from_block: int, to_block: int) -> list:
     return (
-        fetch_pool_logs(from_block, to_block)
+        fetch_pool_and_gateway_logs(from_block, to_block)
         + fetch_standx_withdraw_logs(from_block, to_block)
     )
 
@@ -693,6 +766,14 @@ def process_block_range(from_block: int, to_block: int) -> None:
                 event = dusd.events.Transfer().process_log(entry)
                 handle_standx_withdraw(event)
 
+            elif topic0 == WITHDRAW_REQUEST_TOPIC:
+                event = standx_gateway.events.WithdrawRequest().process_log(entry)
+                handle_standx_redeem_request(event)
+
+            elif topic0 == WITHDRAW_TOPIC:
+                event = standx_gateway.events.Withdraw().process_log(entry)
+                handle_standx_redeem(event)
+
         # Commit after every complete event-bearing block. A later failure in a
         # large RPC chunk then cannot replay alerts from earlier blocks.
         state["last_block"] = block_number
@@ -717,6 +798,10 @@ def validate_chain_and_pool() -> None:
 
     if not w3.eth.get_code(POOL_ADDRESS):
         die("No contract code found at configured pool address")
+    if not w3.eth.get_code(STANDX_HIGHWAY_ADDRESS):
+        die("No contract code found at configured StandX Highway address")
+    if not w3.eth.get_code(STANDX_GATEWAY_ADDRESS):
+        die("No contract code found at configured StandX Gateway address")
 
     token0 = Web3.to_checksum_address(pool.functions.token0().call())
     token1 = Web3.to_checksum_address(pool.functions.token1().call())
@@ -776,7 +861,7 @@ def initialize_state() -> None:
         state["last_block"] = target
 
     last_block = int(state["last_block"])
-    if target - last_block > MAX_BACKFILL_BLOCKS:
+    if MAX_BACKFILL_BLOCKS > 0 and target - last_block > MAX_BACKFILL_BLOCKS:
         old = last_block
         state["last_block"] = target - MAX_BACKFILL_BLOCKS
         log.warning(
@@ -799,7 +884,7 @@ def initialize_state() -> None:
             f"DUSD price: <b>{snap['price']:.6f} USDT</b>\n"
             f"Pool TVL estimate: <b>{money(snap['nominal_tvl'])}</b>\n"
             f"Large swap threshold: {money(WHALE_USD_THRESHOLD)}\n"
-            f"StandX withdrawal threshold: {money(STANDX_WITHDRAW_THRESHOLD)}\n"
+            "StandX withdrawal/redeem alerts: every event\n"
             f"Liquidity-drop threshold: {pct(LIQUIDITY_DROP_PCT)}\n"
             f"Depeg threshold: {DEPEG_THRESHOLD} USDT\n"
             f"Confirmed-block delay: {CONFIRMATIONS} blocks"

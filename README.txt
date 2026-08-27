@@ -9,7 +9,8 @@ Alerts:
   - >=10% pool token-balance TVL drop
   - V3 Burn event >=10% of reference TVL
   - >=$50,000 direct DUSD/USDT swap
-  - >=$50,000 DUSD withdrawal from the StandX Highway
+  - Every DUSD withdrawal from the StandX Highway
+  - Every StandX redemption request and completed USDT/USDC payout
   - DUSD <0.998 USDT
 
 Install:
@@ -39,3 +40,7 @@ Notes:
     unconfirmed chain state does not trigger liquidity or depeg alerts.
   * State is persisted in dusd_pool_monitor_state.json so restarts do not
     intentionally reprocess old blocks.
+  * POLL_SECONDS only changes how often blocks are checked. Every confirmed
+    block since the saved cursor is still processed, so 20 seconds is safe.
+  * MAX_BACKFILL_BLOCKS=0 prevents event gaps after downtime. Set a positive
+    cap only if intentionally skipping older blocks is acceptable.

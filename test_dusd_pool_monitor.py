@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from hexbytes import HexBytes
@@ -82,21 +83,19 @@ class MonitorTests(unittest.TestCase):
             },
         }
 
-        with patch.object(
-            monitor, "STANDX_WITHDRAW_THRESHOLD", Decimal("50000")
-        ), patch.object(monitor, "send_telegram") as send:
+        with patch.object(monitor, "send_telegram") as send:
             monitor.handle_standx_withdraw(event)
 
         send.assert_called_once()
         message = send.call_args.args[0]
-        self.assertIn("LARGE STANDX WITHDRAWAL", message)
+        self.assertIn("STANDX WITHDRAWAL COMPLETED", message)
         self.assertIn("148,698.502775 DUSD", message)
         self.assertIn(event["args"]["to"], message)
         self.assertIn(
             "https://bscscan.com/tx/" + event["transactionHash"].hex(), message
         )
 
-    def test_small_standx_withdraw_does_not_alert(self):
+    def test_small_standx_withdraw_also_alerts(self):
         event = {
             "transactionHash": HexBytes("0x" + "cd" * 32),
             "args": {
@@ -106,12 +105,55 @@ class MonitorTests(unittest.TestCase):
             },
         }
 
-        with patch.object(
-            monitor, "STANDX_WITHDRAW_THRESHOLD", Decimal("50000")
-        ), patch.object(monitor, "send_telegram") as send:
+        with patch.object(monitor, "send_telegram") as send:
             monitor.handle_standx_withdraw(event)
 
-        send.assert_not_called()
+        send.assert_called_once()
+        self.assertIn("1,000.000000 DUSD", send.call_args.args[0])
+
+    def test_real_standx_redeem_request_shape_alerts(self):
+        event = {
+            "transactionHash": HexBytes(
+                "0x1482d1afd3dceeba69f165dd1178f0fccb5472779e476fd85bcb24d62b2e7cce"
+            ),
+            "args": {
+                "user": "0xD7e526459F82bb3b43DCC73e25BD3AfAaA4ad637",
+                "amount": 20_095_363_765,
+                "id": 0,
+            },
+        }
+
+        with patch.object(monitor, "send_telegram") as send:
+            monitor.handle_standx_redeem_request(event)
+
+        send.assert_called_once()
+        message = send.call_args.args[0]
+        self.assertIn("STANDX REDEMPTION REQUESTED", message)
+        self.assertIn("20,095.363765 DUSD", message)
+        self.assertIn(event["args"]["user"], message)
+        self.assertIn("Redemption ID: <code>0</code>", message)
+
+    def test_real_standx_redeem_completion_shape_alerts(self):
+        event = {
+            "transactionHash": HexBytes(
+                "0x774b31976c933824dfb46fda00d0908064cf130eacde5c2fdd10c27c52657320"
+            ),
+            "args": {
+                "user": "0xD3dAC35eEeA16A40715A17Ae67C30e96B6508BC6",
+                "amount": 998_500_500_000_000_000_000,
+                "id": 0,
+            },
+        }
+
+        with patch.object(monitor, "send_telegram") as send:
+            monitor.handle_standx_redeem(event)
+
+        send.assert_called_once()
+        message = send.call_args.args[0]
+        self.assertIn("STANDX REDEMPTION COMPLETED", message)
+        self.assertIn("998.500500 USDT/USDC", message)
+        self.assertIn(event["args"]["user"], message)
+        self.assertIn("Redemption ID: <code>0</code>", message)
 
     def test_fetches_standx_withdraws_from_dusd_highway_transfers(self):
         with patch.object(
@@ -120,12 +162,138 @@ class MonitorTests(unittest.TestCase):
             monitor.fetch_relevant_logs(100, 200)
 
         self.assertEqual(get_logs.call_count, 2)
+        protocol_filter = get_logs.call_args_list[0].args[0]
+        self.assertEqual(
+            protocol_filter["address"],
+            [monitor.POOL_ADDRESS, monitor.STANDX_GATEWAY_ADDRESS],
+        )
+        self.assertEqual(
+            protocol_filter["topics"],
+            [[
+                monitor.SWAP_TOPIC,
+                monitor.BURN_TOPIC,
+                monitor.WITHDRAW_REQUEST_TOPIC,
+                monitor.WITHDRAW_TOPIC,
+            ]],
+        )
         withdraw_filter = get_logs.call_args_list[1].args[0]
         self.assertEqual(withdraw_filter["address"], monitor.DUSD_ADDRESS)
         self.assertEqual(
             withdraw_filter["topics"],
             [monitor.TRANSFER_TOPIC, monitor.STANDX_HIGHWAY_TOPIC],
         )
+        for event_filter in (protocol_filter, withdraw_filter):
+            self.assertEqual(event_filter["fromBlock"], 100)
+            self.assertEqual(event_filter["toBlock"], 200)
+
+    def test_real_log_shapes_decode_and_dispatch_all_standx_event_types(self):
+        def log_entry(
+            *, address, topics, data, block_number, log_index, tx_hash
+        ):
+            return {
+                "address": address,
+                "topics": [HexBytes(topic) for topic in topics],
+                "data": HexBytes(data),
+                "blockNumber": block_number,
+                "transactionHash": HexBytes(tx_hash),
+                "transactionIndex": 0,
+                "blockHash": HexBytes("0x" + f"{block_number:064x}"),
+                "logIndex": log_index,
+                "removed": False,
+            }
+
+        highway_withdraw = log_entry(
+            address=monitor.DUSD_ADDRESS,
+            topics=[
+                monitor.TRANSFER_TOPIC,
+                monitor.STANDX_HIGHWAY_TOPIC,
+                monitor.address_topic(
+                    "0x0808A2B6962EF20936431178743E47277016104d"
+                ),
+            ],
+            data="0x" + f"{148_698_502_775:064x}",
+            block_number=9,
+            log_index=0,
+            tx_hash=(
+                "0x9a622d7b10a6c240ba74b096ac7f5ae92794330809390d987658a3c8f5a03fdd"
+            ),
+        )
+        redeem_request = log_entry(
+            address=monitor.STANDX_GATEWAY_ADDRESS,
+            topics=[
+                monitor.WITHDRAW_REQUEST_TOPIC,
+                monitor.address_topic(
+                    "0xD7e526459F82bb3b43DCC73e25BD3AfAaA4ad637"
+                ),
+            ],
+            data=(
+                "0x"
+                + f"{20_095_363_765:064x}"
+                + f"{0:064x}"
+            ),
+            block_number=10,
+            log_index=0,
+            tx_hash=(
+                "0x1482d1afd3dceeba69f165dd1178f0fccb5472779e476fd85bcb24d62b2e7cce"
+            ),
+        )
+        redeem_completion = log_entry(
+            address=monitor.STANDX_GATEWAY_ADDRESS,
+            topics=[
+                monitor.WITHDRAW_TOPIC,
+                monitor.address_topic(
+                    "0xD3dAC35eEeA16A40715A17Ae67C30e96B6508BC6"
+                ),
+            ],
+            data=(
+                "0x"
+                + f"{998_500_500_000_000_000_000:064x}"
+                + f"{0:064x}"
+            ),
+            block_number=11,
+            log_index=0,
+            tx_hash=(
+                "0x774b31976c933824dfb46fda00d0908064cf130eacde5c2fdd10c27c52657320"
+            ),
+        )
+
+        with patch.object(
+            monitor,
+            "fetch_relevant_logs",
+            return_value=[redeem_completion, highway_withdraw, redeem_request],
+        ), patch.object(monitor, "send_telegram") as send, patch.object(
+            monitor, "save_state"
+        ):
+            monitor.process_block_range(9, 11)
+
+        self.assertEqual(send.call_count, 3)
+        messages = "\n".join(call.args[0] for call in send.call_args_list)
+        self.assertIn("STANDX WITHDRAWAL COMPLETED", messages)
+        self.assertIn("STANDX REDEMPTION REQUESTED", messages)
+        self.assertIn("STANDX REDEMPTION COMPLETED", messages)
+        self.assertEqual(monitor.state["last_block"], 11)
+
+    def test_unlimited_backfill_preserves_old_cursor(self):
+        monitor.state["last_block"] = 1
+        snapshot = {
+            "price": Decimal("1"),
+            "dusd_balance": Decimal("500000"),
+            "usdt_balance": Decimal("500000"),
+            "nominal_tvl": Decimal("1000000"),
+            "marked_tvl": Decimal("1000000"),
+        }
+        fake_w3 = SimpleNamespace(eth=SimpleNamespace(block_number=20_000))
+
+        with patch.object(monitor, "MAX_BACKFILL_BLOCKS", 0), patch.object(
+            monitor, "w3", fake_w3
+        ), patch.object(
+            monitor, "current_snapshot", return_value=snapshot
+        ), patch.object(monitor, "check_depeg"), patch.object(
+            monitor, "check_tvl"
+        ), patch.object(monitor, "save_state"):
+            monitor.initialize_state()
+
+        self.assertEqual(monitor.state["last_block"], 1)
 
     def test_telegram_errors_do_not_leak_bot_token(self):
         leaked_error = RuntimeError(
