@@ -83,7 +83,9 @@ class MonitorTests(unittest.TestCase):
             },
         }
 
-        with patch.object(monitor, "send_telegram") as send:
+        with patch.object(
+            monitor, "WHALE_USD_THRESHOLD", Decimal("50000")
+        ), patch.object(monitor, "send_telegram") as send:
             monitor.handle_standx_withdraw(event)
 
         send.assert_called_once()
@@ -95,7 +97,7 @@ class MonitorTests(unittest.TestCase):
             "https://bscscan.com/tx/" + event["transactionHash"].hex(), message
         )
 
-    def test_small_standx_withdraw_also_alerts(self):
+    def test_small_standx_withdraw_does_not_alert(self):
         event = {
             "transactionHash": HexBytes("0x" + "cd" * 32),
             "args": {
@@ -105,11 +107,38 @@ class MonitorTests(unittest.TestCase):
             },
         }
 
-        with patch.object(monitor, "send_telegram") as send:
+        with patch.object(
+            monitor, "WHALE_USD_THRESHOLD", Decimal("50000")
+        ), patch.object(monitor, "send_telegram") as send:
             monitor.handle_standx_withdraw(event)
 
-        send.assert_called_once()
-        self.assertIn("1,000.000000 DUSD", send.call_args.args[0])
+        send.assert_not_called()
+
+    def test_small_standx_redeem_events_do_not_alert(self):
+        request = {
+            "transactionHash": HexBytes("0x" + "de" * 32),
+            "args": {
+                "user": "0x" + "45" * 20,
+                "amount": 1_000 * 10**6,
+                "id": 1,
+            },
+        }
+        completion = {
+            "transactionHash": HexBytes("0x" + "ef" * 32),
+            "args": {
+                "user": "0x" + "45" * 20,
+                "amount": 1_000 * 10**18,
+                "id": 1,
+            },
+        }
+
+        with patch.object(
+            monitor, "WHALE_USD_THRESHOLD", Decimal("50000")
+        ), patch.object(monitor, "send_telegram") as send:
+            monitor.handle_standx_redeem_request(request)
+            monitor.handle_standx_redeem(completion)
+
+        send.assert_not_called()
 
     def test_real_standx_redeem_request_shape_alerts(self):
         event = {
@@ -123,7 +152,9 @@ class MonitorTests(unittest.TestCase):
             },
         }
 
-        with patch.object(monitor, "send_telegram") as send:
+        with patch.object(
+            monitor, "WHALE_USD_THRESHOLD", Decimal("500")
+        ), patch.object(monitor, "send_telegram") as send:
             monitor.handle_standx_redeem_request(event)
 
         send.assert_called_once()
@@ -145,7 +176,9 @@ class MonitorTests(unittest.TestCase):
             },
         }
 
-        with patch.object(monitor, "send_telegram") as send:
+        with patch.object(
+            monitor, "WHALE_USD_THRESHOLD", Decimal("500")
+        ), patch.object(monitor, "send_telegram") as send:
             monitor.handle_standx_redeem(event)
 
         send.assert_called_once()
@@ -261,6 +294,8 @@ class MonitorTests(unittest.TestCase):
             monitor,
             "fetch_relevant_logs",
             return_value=[redeem_completion, highway_withdraw, redeem_request],
+        ), patch.object(
+            monitor, "WHALE_USD_THRESHOLD", Decimal("0")
         ), patch.object(monitor, "send_telegram") as send, patch.object(
             monitor, "save_state"
         ):

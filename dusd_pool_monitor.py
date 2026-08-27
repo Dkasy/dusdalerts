@@ -9,8 +9,8 @@ Alerts:
    percentage of the reference TVL.
 3) A swap has >= WHALE_USD_THRESHOLD (default $50,000) of USDT notional.
 4) DUSD pool price falls below DEPEG_THRESHOLD (default 0.998 USDT).
-5) Every completed DUSD withdrawal from the StandX Highway.
-6) Every StandX Gateway redemption request and completed redemption payout.
+5) StandX Highway withdrawals and Gateway redemption events worth at least
+   WHALE_USD_THRESHOLD.
 
 The script is read-only. It never needs a wallet/private key.
 """
@@ -602,6 +602,9 @@ def handle_standx_withdraw(event: Any) -> None:
     tx_hash = Web3.to_hex(event["transactionHash"])
     amount = raw_to_human(int(args["value"]), dusd_decimals)
 
+    if amount < WHALE_USD_THRESHOLD:
+        return
+
     send_telegram(
         "🏦 <b>STANDX WITHDRAWAL COMPLETED</b>\n"
         f"DUSD withdrawn: <b>{amount:,.6f} DUSD</b>\n"
@@ -620,6 +623,9 @@ def handle_standx_redeem_request(event: Any) -> None:
     args = event["args"]
     tx_hash = Web3.to_hex(event["transactionHash"])
     amount = raw_to_human(int(args["amount"]), dusd_decimals)
+
+    if amount < WHALE_USD_THRESHOLD:
+        return
 
     send_telegram(
         "⏳ <b>STANDX REDEMPTION REQUESTED</b>\n"
@@ -642,6 +648,9 @@ def handle_standx_redeem(event: Any) -> None:
     # BSC USDT and USDC use 18 decimals. The Gateway event intentionally does
     # not identify which supported base asset was paid.
     amount = raw_to_human(int(args["amount"]), 18)
+
+    if amount < WHALE_USD_THRESHOLD:
+        return
 
     send_telegram(
         "💸 <b>STANDX REDEMPTION COMPLETED</b>\n"
@@ -884,7 +893,7 @@ def initialize_state() -> None:
             f"DUSD price: <b>{snap['price']:.6f} USDT</b>\n"
             f"Pool TVL estimate: <b>{money(snap['nominal_tvl'])}</b>\n"
             f"Large swap threshold: {money(WHALE_USD_THRESHOLD)}\n"
-            "StandX withdrawal/redeem alerts: every event\n"
+            f"StandX withdrawal/redeem threshold: {money(WHALE_USD_THRESHOLD)}\n"
             f"Liquidity-drop threshold: {pct(LIQUIDITY_DROP_PCT)}\n"
             f"Depeg threshold: {DEPEG_THRESHOLD} USDT\n"
             f"Confirmed-block delay: {CONFIRMATIONS} blocks"
