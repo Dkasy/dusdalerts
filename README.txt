@@ -38,6 +38,10 @@ Notes:
     Chain endpoint rejects this method; the monitor checks capability at startup.
   * Prices and balances are read at the configured confirmed-block delay, so
     unconfirmed chain state does not trigger liquidity or depeg alerts.
+  * Every alert includes the DUSD and USDT amounts still in the pool at the
+    confirmed head when the message is sent.
+  * A StandX Highway withdrawal alert also includes the DUSD still held by
+    the Highway at that same confirmed head.
   * State is persisted in dusd_pool_monitor_state.json so restarts do not
     intentionally reprocess old blocks.
   * POLL_SECONDS only changes how often blocks are checked. Every confirmed

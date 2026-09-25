@@ -12,6 +12,11 @@ Alerts:
 5) StandX Highway withdrawals and Gateway redemption events worth at least
    WHALE_USD_THRESHOLD.
 
+Every alert includes the DUSD and USDT balances still in the pool when the
+message is sent. A StandX Highway withdrawal also includes the DUSD still held
+by the Highway. Those balances are read at the confirmed head, so a backfilled
+event does not require historical eth_call support.
+
 The script is read-only. It never needs a wallet/private key.
 """
 
@@ -496,9 +501,47 @@ def current_snapshot(block_number: Optional[int] = None) -> Dict[str, Decimal]:
     }
 
 
+def confirmed_block_number() -> int:
+    """Return the newest block the monitor treats as final."""
+    return max(0, int(w3.eth.block_number) - CONFIRMATIONS)
+
+
+def pool_reserves_for_alert(
+    snapshot: Optional[Dict[str, Decimal]] = None,
+) -> str:
+    """DUSD and USDT remaining in the pool at alert time."""
+    if snapshot is None:
+        snapshot = current_snapshot(confirmed_block_number())
+    return (
+        f"DUSD left in pool: <b>{snapshot['dusd_balance']:,.2f}</b>\n"
+        f"USDT left in pool: <b>{snapshot['usdt_balance']:,.2f}</b>"
+    )
+
+
+def standx_dusd_balance(block_number: Optional[int] = None) -> Decimal:
+    """Return DUSD held by the StandX Highway at a block."""
+    call_kwargs = (
+        {"block_identifier": block_number} if block_number is not None else {}
+    )
+    raw = int(
+        dusd.functions.balanceOf(STANDX_HIGHWAY_ADDRESS).call(**call_kwargs)
+    )
+    return raw_to_human(raw, dusd_decimals)
+
+
+def standx_reserves_for_alert() -> str:
+    """DUSD remaining on the StandX Highway at alert time."""
+    balance = standx_dusd_balance(confirmed_block_number())
+    return f"DUSD left on StandX: <b>{balance:,.2f}</b>"
+
+
 # ---------------------------- Alert logic ----------------------------
 
-def check_depeg(price: Decimal, tx_hash: Optional[str] = None) -> None:
+def check_depeg(
+    price: Decimal,
+    tx_hash: Optional[str] = None,
+    snapshot: Optional[Dict[str, Decimal]] = None,
+) -> None:
     active = bool(state.get("depeg_active", False))
 
     if price < DEPEG_THRESHOLD and not active:
@@ -506,7 +549,8 @@ def check_depeg(price: Decimal, tx_hash: Optional[str] = None) -> None:
         send_telegram(
             "🔴 <b>DUSD DEPEG ALERT</b>\n"
             f"DUSD price: <b>{price:.6f} USDT</b>\n"
-            f"Threshold: {DEPEG_THRESHOLD} USDT"
+            f"Threshold: {DEPEG_THRESHOLD} USDT\n"
+            f"{pool_reserves_for_alert(snapshot)}"
             f"{link}"
         )
         state["depeg_active"] = True
@@ -547,6 +591,7 @@ def handle_swap(event: Any) -> None:
             f"USDT notional: <b>{money(usdt_notional)}</b>\n"
             f"DUSD amount: {abs(dusd_delta):,.2f}\n"
             f"Price after: <b>{price_after:.6f} USDT</b>\n"
+            f"{pool_reserves_for_alert()}\n"
             f'Sender: <code>{args["sender"]}</code>\n'
             f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
         )
@@ -585,6 +630,7 @@ def handle_burn(event: Any) -> None:
             f"Share of reference pool TVL: <b>{pct(burn_share)}</b>\n"
             f"DUSD removed from position: {dusd_amount:,.2f}\n"
             f"USDT removed from position: {usdt_amount:,.2f}\n"
+            f"{pool_reserves_for_alert()}\n"
             f"Tick range: {args['tickLower']} → {args['tickUpper']}\n"
             "Note: a V3 Burn reduces position liquidity; token transfer out of "
             "the pool can occur via Collect.\n"
@@ -609,6 +655,8 @@ def handle_standx_withdraw(event: Any) -> None:
         "🏦 <b>STANDX WITHDRAWAL COMPLETED</b>\n"
         f"DUSD withdrawn: <b>{amount:,.6f} DUSD</b>\n"
         f"Nominal value: <b>{money(amount)}</b>\n"
+        f"{pool_reserves_for_alert()}\n"
+        f"{standx_reserves_for_alert()}\n"
         f'Recipient: <code>{args["to"]}</code>\n'
         f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
     )
@@ -631,6 +679,7 @@ def handle_standx_redeem_request(event: Any) -> None:
         "⏳ <b>STANDX REDEMPTION REQUESTED</b>\n"
         f"DUSD burned: <b>{amount:,.6f} DUSD</b>\n"
         f"Nominal value: <b>{money(amount)}</b>\n"
+        f"{pool_reserves_for_alert()}\n"
         f'Redeemer: <code>{args["user"]}</code>\n'
         f'Redemption ID: <code>{args["id"]}</code>\n'
         f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
@@ -656,6 +705,7 @@ def handle_standx_redeem(event: Any) -> None:
         "💸 <b>STANDX REDEMPTION COMPLETED</b>\n"
         f"Base asset paid: <b>{amount:,.6f} USDT/USDC</b>\n"
         f"Nominal value: <b>{money(amount)}</b>\n"
+        f"{pool_reserves_for_alert()}\n"
         f'Redeemer: <code>{args["user"]}</code>\n'
         f'Redemption ID: <code>{args["id"]}</code>\n'
         f'<a href="{tx_url(tx_hash)}">View transaction on BscScan</a>'
@@ -695,8 +745,7 @@ def check_tvl(snapshot: Dict[str, Decimal]) -> None:
             f"Reference TVL estimate: <b>{money(reference)}</b>\n"
             f"Current TVL estimate: <b>{money(current)}</b>\n"
             f"Drop: <b>{pct(drop)}</b>\n"
-            f"DUSD in pool: {snapshot['dusd_balance']:,.2f}\n"
-            f"USDT in pool: {snapshot['usdt_balance']:,.2f}\n"
+            f"{pool_reserves_for_alert(snapshot)}\n"
             f"DUSD price: {snapshot['price']:.6f} USDT\n"
             f'<a href="https://bscscan.com/address/{POOL_ADDRESS}">View pool on BscScan</a>'
         )
@@ -900,7 +949,7 @@ def initialize_state() -> None:
         )
 
     # Alert immediately if monitor starts while already below threshold.
-    check_depeg(snap["price"])
+    check_depeg(snap["price"], snapshot=snap)
     check_tvl(snap)
 
 
@@ -928,7 +977,7 @@ def main() -> None:
 
                 # Snapshot after all newly confirmed logs are processed.
                 snap = current_snapshot(target)
-                check_depeg(snap["price"])
+                check_depeg(snap["price"], snapshot=snap)
                 check_tvl(snap)
 
                 log.info(

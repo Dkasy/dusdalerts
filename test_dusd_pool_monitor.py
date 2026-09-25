@@ -19,6 +19,14 @@ os.environ.setdefault("SEND_STARTUP_MESSAGE", "false")
 
 monitor = importlib.import_module("dusd_pool_monitor")
 
+ALERT_RESERVES = {
+    "price": Decimal("1"),
+    "dusd_balance": Decimal("123456.78"),
+    "usdt_balance": Decimal("98765.43"),
+    "nominal_tvl": Decimal("222222.21"),
+    "marked_tvl": Decimal("222222.21"),
+}
+
 
 class MonitorTests(unittest.TestCase):
     def setUp(self):
@@ -35,6 +43,10 @@ class MonitorTests(unittest.TestCase):
 
     def tearDown(self):
         monitor.state = self.old_state
+
+    def assert_pool_reserves(self, message: str) -> None:
+        self.assertIn("DUSD left in pool: <b>123,456.78</b>", message)
+        self.assertIn("USDT left in pool: <b>98,765.43</b>", message)
 
     def test_price_conversion_for_real_pool_order(self):
         # At parity, the raw DUSD/USDT base-unit ratio is 10**-12.
@@ -63,6 +75,10 @@ class MonitorTests(unittest.TestCase):
 
         with patch.object(monitor, "send_telegram") as send, patch.object(
             monitor, "save_state"
+        ), patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ) as snapshot, patch.object(
+            monitor, "confirmed_block_number", return_value=100
         ):
             monitor.handle_swap(event)
 
@@ -70,6 +86,8 @@ class MonitorTests(unittest.TestCase):
         message = send.call_args.args[0]
         self.assertIn("LARGE DUSD POOL SWAP", message)
         self.assertIn("https://bscscan.com/tx/0x" + "ab" * 32, message)
+        self.assert_pool_reserves(message)
+        snapshot.assert_called_once_with(100)
 
     def test_example_standx_withdraw_alert(self):
         event = {
@@ -85,13 +103,22 @@ class MonitorTests(unittest.TestCase):
 
         with patch.object(
             monitor, "WHALE_USD_THRESHOLD", Decimal("50000")
-        ), patch.object(monitor, "send_telegram") as send:
+        ), patch.object(monitor, "send_telegram") as send, patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ), patch.object(
+            monitor, "confirmed_block_number", return_value=100
+        ), patch.object(
+            monitor, "standx_dusd_balance", return_value=Decimal("5000000.5")
+        ) as standx_balance:
             monitor.handle_standx_withdraw(event)
 
         send.assert_called_once()
         message = send.call_args.args[0]
         self.assertIn("STANDX WITHDRAWAL COMPLETED", message)
         self.assertIn("148,698.502775 DUSD", message)
+        self.assert_pool_reserves(message)
+        self.assertIn("DUSD left on StandX: <b>5,000,000.50</b>", message)
+        standx_balance.assert_called_once_with(100)
         self.assertIn(event["args"]["to"], message)
         self.assertIn(
             "https://bscscan.com/tx/" + event["transactionHash"].hex(), message
@@ -154,13 +181,16 @@ class MonitorTests(unittest.TestCase):
 
         with patch.object(
             monitor, "WHALE_USD_THRESHOLD", Decimal("500")
-        ), patch.object(monitor, "send_telegram") as send:
+        ), patch.object(monitor, "send_telegram") as send, patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ), patch.object(monitor, "confirmed_block_number", return_value=100):
             monitor.handle_standx_redeem_request(event)
 
         send.assert_called_once()
         message = send.call_args.args[0]
         self.assertIn("STANDX REDEMPTION REQUESTED", message)
         self.assertIn("20,095.363765 DUSD", message)
+        self.assert_pool_reserves(message)
         self.assertIn(event["args"]["user"], message)
         self.assertIn("Redemption ID: <code>0</code>", message)
 
@@ -178,13 +208,16 @@ class MonitorTests(unittest.TestCase):
 
         with patch.object(
             monitor, "WHALE_USD_THRESHOLD", Decimal("500")
-        ), patch.object(monitor, "send_telegram") as send:
+        ), patch.object(monitor, "send_telegram") as send, patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ), patch.object(monitor, "confirmed_block_number", return_value=100):
             monitor.handle_standx_redeem(event)
 
         send.assert_called_once()
         message = send.call_args.args[0]
         self.assertIn("STANDX REDEMPTION COMPLETED", message)
         self.assertIn("998.500500 USDT/USDC", message)
+        self.assert_pool_reserves(message)
         self.assertIn(event["args"]["user"], message)
         self.assertIn("Redemption ID: <code>0</code>", message)
 
@@ -297,6 +330,12 @@ class MonitorTests(unittest.TestCase):
         ), patch.object(
             monitor, "WHALE_USD_THRESHOLD", Decimal("0")
         ), patch.object(monitor, "send_telegram") as send, patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ), patch.object(
+            monitor, "confirmed_block_number", return_value=100
+        ), patch.object(
+            monitor, "standx_dusd_balance", return_value=Decimal("5000000.5")
+        ), patch.object(
             monitor, "save_state"
         ):
             monitor.process_block_range(9, 11)
@@ -306,6 +345,9 @@ class MonitorTests(unittest.TestCase):
         self.assertIn("STANDX WITHDRAWAL COMPLETED", messages)
         self.assertIn("STANDX REDEMPTION REQUESTED", messages)
         self.assertIn("STANDX REDEMPTION COMPLETED", messages)
+        self.assertEqual(messages.count("DUSD left in pool: <b>123,456.78</b>"), 3)
+        self.assertEqual(messages.count("USDT left in pool: <b>98,765.43</b>"), 3)
+        self.assertEqual(messages.count("DUSD left on StandX: <b>5,000,000.50</b>"), 1)
         self.assertEqual(monitor.state["last_block"], 11)
 
     def test_unlimited_backfill_preserves_old_cursor(self):
@@ -351,10 +393,13 @@ class MonitorTests(unittest.TestCase):
     def test_depeg_alert_hysteresis(self):
         with patch.object(monitor, "send_telegram") as send, patch.object(
             monitor, "save_state"
-        ):
+        ), patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ), patch.object(monitor, "confirmed_block_number", return_value=100):
             monitor.check_depeg(Decimal("0.997"))
             monitor.check_depeg(Decimal("0.996"))
             self.assertEqual(send.call_count, 1)
+            self.assert_pool_reserves(send.call_args.args[0])
             self.assertTrue(monitor.state["depeg_active"])
 
             monitor.check_depeg(Decimal("0.999"))
@@ -379,6 +424,9 @@ class MonitorTests(unittest.TestCase):
             monitor.check_tvl(snapshot)
 
         send.assert_called_once()
+        message = send.call_args.args[0]
+        self.assertIn("DUSD left in pool: <b>450,000.00</b>", message)
+        self.assertIn("USDT left in pool: <b>449,999.00</b>", message)
         self.assertEqual(monitor.state["reference_tvl_usd"], "899999")
 
     def test_event_progress_is_saved_per_complete_block(self):
@@ -440,6 +488,43 @@ class MonitorTests(unittest.TestCase):
             abs(snapshot["nominal_tvl"] - Decimal("1000000")),
             Decimal("0.000001"),
         )
+
+    def test_standx_balance_is_read_at_confirmed_block(self):
+        balance_call = Mock()
+        balance_call.call.return_value = 2_500_000 * 10**6
+        fake_dusd = Mock()
+        fake_dusd.functions.balanceOf.return_value = balance_call
+
+        with patch.object(monitor, "dusd", fake_dusd):
+            balance = monitor.standx_dusd_balance(100)
+
+        fake_dusd.functions.balanceOf.assert_called_once_with(
+            monitor.STANDX_HIGHWAY_ADDRESS
+        )
+        balance_call.call.assert_called_once_with(block_identifier=100)
+        self.assertEqual(balance, Decimal("2500000"))
+
+    def test_large_burn_alert_includes_pool_reserves(self):
+        monitor.state["reference_tvl_usd"] = "1000000"
+        event = {
+            "transactionHash": HexBytes("0x" + "11" * 32),
+            "args": {
+                "amount0": 200_000 * 10**18,
+                "amount1": 50_000 * 10**6,
+                "tickLower": -100,
+                "tickUpper": 100,
+            },
+        }
+
+        with patch.object(monitor, "send_telegram") as send, patch.object(
+            monitor, "current_snapshot", return_value=ALERT_RESERVES
+        ), patch.object(monitor, "confirmed_block_number", return_value=100):
+            monitor.handle_burn(event)
+
+        send.assert_called_once()
+        message = send.call_args.args[0]
+        self.assertIn("LARGE LIQUIDITY BURN", message)
+        self.assert_pool_reserves(message)
 
     def test_corrupt_state_values_are_reset(self):
         with tempfile.TemporaryDirectory() as directory:
